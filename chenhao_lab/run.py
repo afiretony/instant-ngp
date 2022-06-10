@@ -11,7 +11,8 @@
 import argparse
 import os
 import commentjson as json
-
+import matplotlib.pyplot as plt
+import json
 import numpy as np
 
 import sys
@@ -58,6 +59,7 @@ def parse_args():
 	parser.add_argument("--n_steps", type=int, default=-1, help="Number of steps to train for before quitting.")
 
 	parser.add_argument("--sharpen", default=0, help="Set amount of sharpening applied to NeRF training images.")
+	parser.add_argument("--work_space", type=str, help="Set the work dir to save training results etc.")
 	
 
 	args = parser.parse_args()
@@ -144,7 +146,7 @@ def eval(mode, step, transforms):
 			testbed.set_nerf_camera_matrix(np.matrix(frame["transform_matrix"])[:-1,:])
 			image = testbed.render(ref_image.shape[1], ref_image.shape[0], spp, True)
 
-			out_folder = os.path.join(args.screenshot_dir, "checkpoint_{:05d}".format(step), mode+"_res")
+			out_folder = os.path.join(args.work_space, "checkpoint_{:05d}".format(step), mode+"_res")
 			if not os.path.exists(out_folder):
 				# os.mkdir(out_folder)
 				os.makedirs(out_folder, mode = 0o777, exist_ok = False) 
@@ -192,9 +194,9 @@ if __name__ == "__main__":
 	testbed = ngp.Testbed(mode)
 	testbed.nerf.sharpen = float(args.sharpen)
 
-	train_transforms = os.path.join(args.scene, 'train_transforms.json') 
-	test_transforms = os.path.join(args.scene, 'test_transforms.json')
-	print(train_transforms)
+	train_transforms = os.path.join(args.scene, 'transforms_train_config_1.json') 
+	test_transforms = os.path.join(args.scene, 'transforms_test_focus.json')
+
 	testbed.load_training_data(train_transforms)
 	testbed.reload_network_from_file(network)
 	print("Training loaded")
@@ -209,41 +211,22 @@ if __name__ == "__main__":
 		print("NeRF training ray near_distance ", args.near_distance)
 		testbed.nerf.training.near_distance = args.near_distance
 
-	# if args.nerf_compatibility:
-	# 	print(f"NeRF compatibility mode enabled")
-
-	# 	# Prior nerf papers accumulate/blend in the sRGB
-	# 	# color space. This messes not only with background
-	# 	# alpha, but also with DOF effects and the likes.
-	# 	# We support this behavior, but we only enable it
-	# 	# for the case of synthetic nerf data where we need
-	# 	# to compare PSNR numbers to results of prior work.
-	# 	testbed.color_space = ngp.ColorSpace.SRGB
-
-	# 	# No exponential cone tracing. Slightly increases
-	# 	# quality at the cost of speed. This is done by
-	# 	# default on scenes with AABB 1 (like the synthetic
-	# 	# ones), but not on larger scenes. So force the
-	# 	# setting here.
-	# 	testbed.nerf.cone_angle_constant = 0
-
-	# 	# Optionally match nerf paper behaviour and train on a
-	# 	# fixed white bg. We prefer training on random BG colors.
-	# 	# testbed.background_color = [1.0, 1.0, 1.0, 1.0]
-	# 	# testbed.nerf.training.random_bg_color = False
-
 	old_training_step = 0
 	n_steps = args.n_steps
 	if n_steps < 0:
 		n_steps = 10000
 
 	log = {}
-	log["step"]=[]
-	log["psnr_train"]= []
-	log["psnr_test"] = []
-	log["ssim_train"]= []
-	log["ssim_test"] = []
-	
+	log["psnr_train"]= {}
+	log["psnr_test"] = {}
+	log["ssim_train"]= {}
+	log["ssim_test"] = {}
+	log["loss"] = {}
+	log["time"] = {}
+	loss_frequency = 10
+
+	start_time = time.time()
+	rendering_time = 0.0 # to subtract
 
 
 	if n_steps > 0:
@@ -268,150 +251,71 @@ if __name__ == "__main__":
 				t.set_postfix(loss=testbed.loss)
 				old_training_step = testbed.training_step
 
+				curr_time = time.time()-start_time-rendering_time
+
+				if testbed.training_step % loss_frequency == 0:
+					log["loss"][testbed.training_step] = testbed.loss
+
 				# render and save training frame results
 				if testbed.training_step % args.screenshot_frequency == 0:
 					print("Rendering results")
-					out_folder = os.path.join(args.screenshot_dir, 'training_output')
+					temp_time = time.time()
+					out_folder = os.path.join(args.work_space, 'training_output')
 					# render_frames(args, ref_transforms, out_folder, testbed.training_step)
 					
 					train_psnr, train_ssim, train_maxpsnr, train_minpsnr = eval("train", testbed.training_step, train_transforms)
 					test_psnr, test_ssim, test_maxpsnr, test_minpsnr = eval("test", testbed.training_step, test_transforms)
-					log["step"].append(testbed.training_step)
-					log["psnr_test"].append(test_psnr)
-					log["ssim_test"].append(test_ssim)
-					log["psnr_train"].append(train_psnr)
-					log["ssim_train"].append(train_ssim)
+					log["psnr_test"][testbed.training_step]=test_psnr
+					log["ssim_test"][testbed.training_step]=test_ssim
+					log["psnr_train"][testbed.training_step]=train_psnr
+					log["ssim_train"][testbed.training_step]=train_ssim
+					log["time"][testbed.training_step]=curr_time
+					rendering_time += time.time()-temp_time
 
-	with open(os.path.join(args.screenshot_dir, 'training.json'),'w') as outfile:
+	with open(os.path.join(args.work_space, 'results.json'),'w') as outfile:
 		json.dump(log, outfile, indent=4)
 
 	# if args.save_snapshot:
 	# 	print("Saving snapshot ", args.save_snapshot)
 	# 	testbed.save_snapshot(args.save_snapshot, False)
 
-	# if args.test_transforms:
-	# 	print("Evaluating test transforms from ", args.test_transforms)
-	# 	with open(args.test_transforms) as f:
-	# 		test_transforms = json.load(f)
-	# 	data_dir=os.path.dirname(args.test_transforms)
-	# 	totmse = 0
-	# 	totpsnr = 0
-	# 	totssim = 0
-	# 	totcount = 0
-	# 	minpsnr = 1000
-	# 	maxpsnr = 0
-
-	# 	# Evaluate metrics on black background
-	# 	testbed.background_color = [0.0, 0.0, 0.0, 1.0]
-
-	# 	# Prior nerf papers don't typically do multi-sample anti aliasing.
-	# 	# So snap all pixels to the pixel centers.
-	# 	testbed.snap_to_pixel_centers = True
-	# 	spp = 8
-
-	# 	testbed.nerf.rendering_min_transmittance = 1e-4
-
-	# 	testbed.fov_axis = 0
-	# 	testbed.fov = test_transforms["camera_angle_x"] * 180 / np.pi
-	# 	testbed.shall_train = False
-
-	# 	with tqdm(list(enumerate(test_transforms["frames"])), unit="images", desc=f"Rendering test frame") as t:
-	# 		for i, frame in t:
-	# 			p = frame["file_path"]
-	# 			if "." not in p:
-	# 				p = p + ".png"
-	# 			ref_fname = os.path.join(data_dir, p)
-	# 			if not os.path.isfile(ref_fname):
-	# 				ref_fname = os.path.join(data_dir, p + ".png")
-	# 				if not os.path.isfile(ref_fname):
-	# 					ref_fname = os.path.join(data_dir, p + ".jpg")
-	# 					if not os.path.isfile(ref_fname):
-	# 						ref_fname = os.path.join(data_dir, p + ".jpeg")
-	# 						if not os.path.isfile(ref_fname):
-	# 							ref_fname = os.path.join(data_dir, p + ".exr")
-
-	# 			ref_image = read_image(ref_fname)
-
-	# 			# NeRF blends with background colors in sRGB space, rather than first
-	# 			# transforming to linear space, blending there, and then converting back.
-	# 			# (See e.g. the PNG spec for more information on how the `alpha` channel
-	# 			# is always a linear quantity.)
-	# 			# The following lines of code reproduce NeRF's behavior (if enabled in
-	# 			# testbed) in order to make the numbers comparable.
-	# 			if testbed.color_space == ngp.ColorSpace.SRGB and ref_image.shape[2] == 4:
-	# 				# Since sRGB conversion is non-linear, alpha must be factored out of it
-	# 				ref_image[...,:3] = np.divide(ref_image[...,:3], ref_image[...,3:4], out=np.zeros_like(ref_image[...,:3]), where=ref_image[...,3:4] != 0)
-	# 				ref_image[...,:3] = linear_to_srgb(ref_image[...,:3])
-	# 				ref_image[...,:3] *= ref_image[...,3:4]
-	# 				ref_image += (1.0 - ref_image[...,3:4]) * testbed.background_color
-	# 				ref_image[...,:3] = srgb_to_linear(ref_image[...,:3])
-
-	# 			if i == 0:
-	# 				write_image("ref.png", ref_image)
-
-	# 			testbed.set_nerf_camera_matrix(np.matrix(frame["transform_matrix"])[:-1,:])
-	# 			image = testbed.render(ref_image.shape[1], ref_image.shape[0], spp, True)
-
-	# 			if i == 0:
-	# 				write_image("out.png", image)
-
-	# 			diffimg = np.absolute(image - ref_image)
-	# 			diffimg[...,3:4] = 1.0
-	# 			if i == 0:
-	# 				write_image("diff.png", diffimg)
-
-	# 			A = np.clip(linear_to_srgb(image[...,:3]), 0.0, 1.0)
-	# 			R = np.clip(linear_to_srgb(ref_image[...,:3]), 0.0, 1.0)
-	# 			mse = float(compute_error("MSE", A, R))
-	# 			ssim = float(compute_error("SSIM", A, R))
-	# 			totssim += ssim
-	# 			totmse += mse
-	# 			psnr = mse2psnr(mse)
-	# 			totpsnr += psnr
-	# 			minpsnr = psnr if psnr<minpsnr else minpsnr
-	# 			maxpsnr = psnr if psnr>maxpsnr else maxpsnr
-	# 			totcount = totcount+1
-	# 			t.set_postfix(psnr = totpsnr/(totcount or 1))
-
-	# 	psnr_avgmse = mse2psnr(totmse/(totcount or 1))
-	# 	psnr = totpsnr/(totcount or 1)
-	# 	ssim = totssim/(totcount or 1)
-	# 	print(f"PSNR={psnr} [min={minpsnr} max={maxpsnr}] SSIM={ssim}")
 
 	if args.save_mesh:
-		res = args.marching_cubes_res or 256
+		res = args.marching_cubes_res or 512
 		print(f"Generating mesh via marching cubes and saving to {args.save_mesh}. Resolution=[{res},{res},{res}]")
-		testbed.compute_and_save_marching_cubes_mesh(args.save_mesh, [res, res, res])
-
-	# if args.width:
-	# 	if ref_transforms:
-	# 		testbed.fov_axis = 0
-	# 		testbed.fov = ref_transforms["camera_angle_x"] * 180 / np.pi
-	# 		if not args.screenshot_cams:
-	# 			args.screenshot_cams = range(len(ref_transforms["frames"]))
-	# 		print(args.screenshot_cams)
-	# 		for idx in args.screenshot_cams:
-	# 			f = ref_transforms["frames"][int(idx)]
-	# 			cam_matrix = f["transform_matrix"]
-	# 			testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
-	# 			outname = os.path.join(args.screenshot_dir, os.path.basename(f["file_path"]))
-
-	# 			# Some NeRF datasets lack the .png suffix in the dataset metadata
-	# 			if not os.path.splitext(outname)[1]:
-	# 				outname = outname + ".png"
-
-	# 			print(f"rendering {outname}")
-	# 			image = testbed.render(args.width or int(ref_transforms["w"]), args.height or int(ref_transforms["h"]), args.screenshot_spp, True)
-	# 			os.makedirs(os.path.dirname(outname), exist_ok=True)
-	# 			write_image(outname, image)
-
-	# 	elif args.screenshot_dir:
-	# 		outname = os.path.join(args.screenshot_dir, args.scene + "_" + network_stem)
-	# 		print(f"Rendering {outname}.png")
-	# 		image = testbed.render(args.width, args.height, args.screenshot_spp, True)
-	# 		if os.path.dirname(outname) != "":
-	# 			os.makedirs(os.path.dirname(outname), exist_ok=True)
-	# 		write_image(outname + ".png", image)
+		testbed.compute_and_save_marching_cubes_mesh(os.path.join(args.work_space, args.save_mesh), [res, res, res])
 
 
 
+	# with open("test_config_1/results.json") as f:
+	# 	log = json.load(f)
+
+	plt.figure(0)
+	title = 'Training loss'
+	plt.plot(log["loss"].keys(),log["loss"].values(), label='training loss')
+	plt.xlabel("n iteration")
+	plt.title(title)
+	plt.legend(loc="upper right")
+	plt.savefig(os.path.join(args.work_space, title+'.png'))
+	
+	plt.figure(1)
+	title = "PSNR"
+	plt.plot(log["psnr_test"].keys(), log["psnr_test"].values(), label="test")
+	plt.plot(log["psnr_train"].keys(), log["psnr_train"].values(), label="train")
+	plt.xlabel("n iteration")
+	plt.title(title)
+	plt.grid('both')
+	plt.legend(loc="upper right")
+	plt.savefig(os.path.join(args.work_space, title+'.png'))
+
+	
+	plt.figure(2)
+	title = "SSIM"
+	plt.plot(log["ssim_test"].keys(), log["ssim_test"].values(), label="test")
+	plt.plot(log["ssim_train"].keys(), log["ssim_train"].values(), label="train")
+	plt.xlabel("n iteration")
+	plt.title(title)
+	plt.grid('both')
+	plt.legend(loc="upper right")
+	plt.savefig(os.path.join(args.work_space, title+'.png'))
+	
