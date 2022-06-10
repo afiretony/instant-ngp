@@ -194,7 +194,7 @@ if __name__ == "__main__":
 	testbed = ngp.Testbed(mode)
 	testbed.nerf.sharpen = float(args.sharpen)
 
-	train_transforms = os.path.join(args.scene, 'transforms_train_config_1.json') 
+	train_transforms = os.path.join(args.scene, 'transforms_train_config_4.json') 
 	test_transforms = os.path.join(args.scene, 'transforms_test_focus.json')
 
 	testbed.load_training_data(train_transforms)
@@ -319,3 +319,29 @@ if __name__ == "__main__":
 	plt.legend(loc="upper right")
 	plt.savefig(os.path.join(args.work_space, title+'.png'))
 	
+	with open(args.work_space +"README.md", "w") as f:
+		f.write("# Experiment Setup\n")
+		f.write("## Camera\n")
+		f.write("![](config_.png)\n")
+		f.write("## Evaluation metric\n")
+		f.write("PSNR and SSIM of training data (input two images) and testing data (front focus view of the object).\n")
+		f.write("![](./focus_view_.png)\n")
+		f.write("# Results\n")
+		f.write("## Quantitative\n")
+		f.write("|Iteration| Time(sec) | Train PSNR | Test PSNR| Train SSIM |Test SSIM|\n")
+		f.write("|---|---|---|---|---|---|\n")
+		checkpoints = list(log['psnr_train'].keys())
+		for c in checkpoints:
+			f.write("| {:04d} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |\n".format(int(c), log['time'][c], log['psnr_train'][c], log['psnr_test'][c], log['ssim_train'][c], log['ssim_test'][c]))
+		
+		f.write("\n")
+		f.write("![](PSNR.png)\n![](SSIM.png)\n![](Training_loss.png)\n")
+		f.write("## Qualitative\n\
+	Training\n\n\
+	![](checkpoint_02500/train_res/RGBA_CAM_000.png)\n\
+	![](checkpoint_02500/train_res/RGBA_CAM_001.png)\n\n\
+	Testing\n\n\
+	![](checkpoint_02500/test_res/RGBA_CAM_000.png)\n\
+	![](checkpoint_02500/test_res/RGBA_CAM_033.png)\n\
+	# Conclusion\n\
+		")
