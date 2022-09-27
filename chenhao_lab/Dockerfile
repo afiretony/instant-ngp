@@ -6,6 +6,11 @@ FROM pytorch/pytorch:1.10.0-cuda11.3-cudnn8-devel
 ENV PYTHONDONTWRITEBYTECODE 1
 
 ## General, instant-ngp doesn't use everything
+RUN apt-key del 7fa2af80
+
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/$distro/$arch/cuda-keyring_1.0-1_all.deb && \
+dpkg -i cuda-keyring_1.0-1_all.deb
+
 RUN \
   apt-get update && \
   apt-get install -y python3 python3-pip unzip && \
