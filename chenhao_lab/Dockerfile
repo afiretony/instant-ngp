@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ## General, instant-ngp doesn't use everything
 RUN apt-key del 7fa2af80
 
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/$distro/$arch/cuda-keyring_1.0-1_all.deb && \
+RUN apt-get install -y wget \ 
+wget https://developer.download.nvidia.com/compute/cuda/repos/$distro/$arch/cuda-keyring_1.0-1_all.deb && \
 dpkg -i cuda-keyring_1.0-1_all.deb
 
 RUN \
@@ -16,7 +17,7 @@ RUN \
   apt-get install -y python3 python3-pip unzip && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y libopencv-dev && \
   apt-get install -y \
-    wget unzip git vim less sudo curl unzip
+    unzip git vim less sudo curl unzip
 
 
 ## CMake >=3.19 required for instant-ngp.  There's no package for base image so compile from source
