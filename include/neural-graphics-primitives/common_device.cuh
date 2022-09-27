@@ -205,9 +205,7 @@ inline __host__ __device__ Ray pixel_to_ray_pinhole(
 	const Eigen::Vector2i& resolution,
 	const Eigen::Vector2f& focal_length,
 	const Eigen::Matrix<float, 3, 4>& camera_matrix,
-	const Eigen::Vector2f& screen_center,
-	float focus_z = 1.0f,
-	float dof = 0.0f
+	const Eigen::Vector2f& screen_center
 ) {
 	const Eigen::Vector2f uv = pixel.cast<float>().cwiseQuotient(resolution.cast<float>());
 
@@ -223,9 +221,16 @@ inline __host__ __device__ Ray pixel_to_ray_pinhole(
 	return {origin, dir};
 }
 
-inline __host__ __device__ Eigen::Matrix<float, 3, 4> get_xform_given_rolling_shutter(const TrainingXForm &training_xform, const Eigen::Vector4f &rolling_shutter, const Eigen::Vector2f &uv, float motionblur_time) {
+inline __host__ __device__ Eigen::Matrix<float, 3, 4> get_xform_given_rolling_shutter(const TrainingXForm& training_xform, const Eigen::Vector4f& rolling_shutter, const Eigen::Vector2f& uv, float motionblur_time) {
 	float pixel_t = rolling_shutter.x() + rolling_shutter.y() * uv.x() + rolling_shutter.z() * uv.y() + rolling_shutter.w() * motionblur_time;
-	return training_xform.start + (training_xform.end - training_xform.start) * pixel_t;
+
+	Eigen::Vector3f pos = training_xform.start.col(3) + (training_xform.end.col(3) - training_xform.start.col(3)) * pixel_t;
+	Eigen::Quaternionf rot = Eigen::Quaternionf(training_xform.start.block<3, 3>(0, 0)).slerp(pixel_t, Eigen::Quaternionf(training_xform.end.block<3, 3>(0, 0)));
+
+	Eigen::Matrix<float, 3, 4> rv;
+	rv.col(3) = pos;
+	rv.block<3, 3>(0, 0) = Eigen::Quaternionf(rot).normalized().toRotationMatrix();
+	return rv;
 }
 
 inline __host__ __device__ Eigen::Vector3f f_theta_undistortion(const Eigen::Vector2f& uv, const float* params, const Eigen::Vector3f& error_direction) {
@@ -243,6 +248,15 @@ inline __host__ __device__ Eigen::Vector3f f_theta_undistortion(const Eigen::Vec
 	return { sin_alpha * xpix, sin_alpha * ypix, cos_alpha };
 }
 
+inline __host__ __device__ Eigen::Vector3f latlong_to_dir(const Eigen::Vector2f& uv) {
+	float theta=(uv.y()-0.5f) * PI();
+	float phi = (uv.x()-0.5f) * (PI()*2.f);
+	float sp,cp,st,ct;
+	sincosf(theta, &st, &ct);
+	sincosf(phi, &sp, &cp);
+	return { sp * ct , st, cp * ct };
+}
+
 inline __host__ __device__ Ray pixel_to_ray(
 	uint32_t spp,
 	const Eigen::Vector2i& pixel,
@@ -253,7 +267,7 @@ inline __host__ __device__ Ray pixel_to_ray(
 	const Eigen::Vector3f& parallax_shift,
 	bool snap_to_pixel_centers = false,
 	float focus_z = 1.0f,
-	float dof = 0.0f,
+	float aperture_size = 0.0f,
 	const CameraDistortion& camera_distortion = {},
 	const float* __restrict__ distortion_data = nullptr,
 	const Eigen::Vector2i distortion_resolution = Eigen::Vector2i::Zero()
@@ -267,6 +281,8 @@ inline __host__ __device__ Ray pixel_to_ray(
 		if (dir.x() == 1000.f) {
 			return {{1000.f, 0.f, 0.f}, {0.f, 0.f, 1.f}}; // return a point outside the aabb so the pixel is not rendered
 		}
+	} else if (camera_distortion.mode == ECameraDistortionMode::LatLong) {
+		dir = latlong_to_dir(uv);
 	} else {
 		dir = {
 			(uv.x() - screen_center.x()) * (float)resolution.x() / focal_length.x(),
@@ -282,16 +298,16 @@ inline __host__ __device__ Ray pixel_to_ray(
 	}
 
 	Eigen::Vector3f head_pos = {parallax_shift.x(), parallax_shift.y(), 0.f};
-	dir -= head_pos / parallax_shift.z(); // we could use focus_z here in the denominator. for now, we pack m_scale in here.
+	dir -= head_pos * parallax_shift.z(); // we could use focus_z here in the denominator. for now, we pack m_scale in here.
 	dir = camera_matrix.block<3, 3>(0, 0) * dir;
 
 	Eigen::Vector3f origin = camera_matrix.block<3, 3>(0, 0) * head_pos + camera_matrix.col(3);
-	if (dof == 0.0f) {
+	if (aperture_size == 0.0f) {
 		return {origin, dir};
 	}
 
 	Eigen::Vector3f lookat = origin + dir * focus_z;
-	Eigen::Vector2f blur = dof * square2disk_shirley(ld_random_val_2d(spp, (uint32_t)pixel.x() * 19349663 + (uint32_t)pixel.y() * 96925573) * 2.0f - Eigen::Vector2f::Ones());
+	Eigen::Vector2f blur = aperture_size * square2disk_shirley(ld_random_val_2d(spp, (uint32_t)pixel.x() * 19349663 + (uint32_t)pixel.y() * 96925573) * 2.0f - Eigen::Vector2f::Ones());
 	origin += camera_matrix.block<3, 2>(0, 0) * blur;
 	dir = (lookat - origin) / focus_z;
 
@@ -314,7 +330,7 @@ inline __host__ __device__ Eigen::Vector2f pos_to_pixel(
 	Eigen::Vector3f dir = pos - origin;
 	dir = camera_matrix.block<3, 3>(0, 0).inverse() * dir;
 	dir /= dir.z();
-	dir += head_pos / parallax_shift.z();
+	dir += head_pos * parallax_shift.z();
 
 	if (camera_distortion.mode == ECameraDistortionMode::Iterative) {
 		float du, dv;
@@ -322,6 +338,8 @@ inline __host__ __device__ Eigen::Vector2f pos_to_pixel(
 		dir.x() += du;
 		dir.y() += dv;
 	} else if (camera_distortion.mode == ECameraDistortionMode::FTheta) {
+		assert(false);
+	}  else if (camera_distortion.mode == ECameraDistortionMode::LatLong) {
 		assert(false);
 	}
 
@@ -517,6 +535,26 @@ inline __host__ __device__ Eigen::Vector3f faceforward(const Eigen::Vector3f& n,
 	return n * copysignf(1.0f, i.dot(nref));
 }
 
+inline __host__ __device__ void apply_quilting(uint32_t* x, uint32_t* y, const Eigen::Vector2i& resolution, Eigen::Vector3f& parallax_shift, const Eigen::Vector2i& quilting_dims) {
+	float resx = float(resolution.x()) / quilting_dims.x();
+	float resy = float(resolution.y()) / quilting_dims.y();
+	int panelx = (int)floorf(*x/resx);
+	int panely = (int)floorf(*y/resy);
+	*x = (*x - panelx * resx);
+	*y = (*y - panely * resy);
+	int idx = panelx + quilting_dims.x() * panely;
+
+	if (quilting_dims == Eigen::Vector2i{2, 1}) {
+		// Likely VR: parallax_shift.x() is the IPD in this case. The following code centers the camera matrix between both eyes.
+		parallax_shift.x() = idx ? (-0.5f * parallax_shift.x()) : (0.5f * parallax_shift.x());
+	} else {
+		// Likely HoloPlay lenticular display: in this case, `parallax_shift.z()` is the inverse height of the head above the display.
+		// The following code computes the x-offset of views as a function of this.
+		const float max_parallax_angle = 17.5f; // suggested value in https://docs.lookingglassfactory.com/keyconcepts/camera
+		float parallax_angle = max_parallax_angle * PI() / 180.f * ((idx+0.5f)*2.f / float(quilting_dims.y() * quilting_dims.x()) - 1.f);
+		parallax_shift.x() = atanf(parallax_angle) / parallax_shift.z();
+	}
+}
 
 template <typename T>
 __global__ void from_rgba32(const uint64_t num_pixels, const uint8_t* __restrict__ pixels, T* __restrict__ out, bool white_2_transparent = false, bool black_2_transparent = false, uint32_t mask_color = 0) {
